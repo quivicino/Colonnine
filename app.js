@@ -20,7 +20,8 @@
     vicini: [],         // colonnine entro il raggio con la potenza scelta, con prezzo e fascia
     filtri: new Set(),
     caricando: false,
-    seguiGps: true
+    seguiGps: true,
+    percorso: null      // percorso attivo: { perc, da, a, metri, secondi, fascia }
   };
   if (![1000, 2000, 5000, 10000].includes(stato.raggio)) stato.raggio = 5000;
   if (!DL.POTENZE[stato.potenza]) stato.potenza = "tutte";
@@ -91,6 +92,9 @@
   const attr = (t) => String(t).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
   const linkNavigazione = (lat, lon) =>
     `https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}&travelmode=driving`;
+  // Navigatore verso l'arrivo del percorso con una sosta alla colonnina
+  const linkTappa = (d, p) =>
+    `https://www.google.com/maps/dir/?api=1&destination=${p.arrivo[0]},${p.arrivo[1]}&waypoints=${d.la},${d.lo}&travelmode=driving`;
   const nomePotenza = () => DL.POTENZE[stato.potenza].breve;
   // Prezzo in centesimi con la "c" piccola accanto (un solo elemento, per restare centrato)
   const conC = (p) => `<span>${DL.formattaCent(p)}<small>c</small></span>`;
@@ -121,10 +125,11 @@
     indiceLetto = Date.now();
     return indice;
   }
-  async function caricaColonnine(lat, lon, raggio, forza) {
+  // "quali" riceve il passo delle tessere e restituisce i nomi delle tessere da scaricare
+  async function caricaColonnine(quali, forza) {
     const ind = await leggiIndice(forza);
     const esistenti = new Set(ind.tessere || []);
-    const nomi = DL.tessereNelRaggio(lat, lon, raggio, ind.passo || 0.25).filter((t) => esistenti.has(t));
+    const nomi = quali(ind.passo || 0.25).filter((t) => esistenti.has(t));
     const mancanti = nomi.filter((t) => !tessere.has(t));
     const parti = await Promise.all(mancanti.map((t) => fetchJson("dati/" + t, {}, 15000)));
     mancanti.forEach((t, i) => tessere.set(t, parti[i].d || []));
@@ -183,15 +188,18 @@
   // ---------- Caricamento ----------
   let giroCarica = 0;
   async function carica(forza, silenzioso) {
-    if (!stato.centro) return;
+    if (!stato.centro && !stato.percorso) return;
     const giro = ++giroCarica;
     stato.caricando = true;
     $("btn-aggiorna").classList.add("gira");
-    const { lat, lon } = stato.centro;
-    if (!silenzioso) messaggio("Cerco colonnine entro " + DL.formattaDistanza(stato.raggio) + "…");
+    const perc = stato.percorso;
+    if (!silenzioso) messaggio(perc ? "Cerco le colonnine lungo il percorso…" : "Cerco colonnine entro " + DL.formattaDistanza(stato.raggio) + "…");
     let errore = null;
     try {
-      const lista = await caricaColonnine(lat, lon, stato.raggio, forza);
+      const quali = perc
+        ? (passo) => DL.tesserePercorso(perc.perc.punti, perc.fascia, passo)
+        : (passo) => DL.tessereNelRaggio(stato.centro.lat, stato.centro.lon, stato.raggio, passo);
+      const lista = await caricaColonnine(quali, forza);
       if (giro !== giroCarica) return;
       stato.tutti = lista;
       stato.tentativi = 0;
@@ -216,7 +224,7 @@
     }
     SUONO.aggiornato();
     const ora = new Date().toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
-    const dove = stato.centro.daGps ? "dalla tua posizione" : "dal punto cercato";
+    const dove = stato.centro && stato.centro.daGps ? "dalla tua posizione" : "dal punto cercato";
     let delGiorno = "";
     if (indice && indice.aggiornato) {
       const d = new Date(indice.aggiornato);
@@ -226,13 +234,21 @@
           " alle " + d.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
       }
     }
+    if (perc) {
+      messaggio(`Sul percorso ${perc.daGps ? "verso " + perc.a : perc.da + " → " + perc.a} (${kmPercorso(perc)}, ${DL.formattaDurata(perc.secondi)}) · ` +
+        `entro ${DL.formattaDistanza(perc.fascia)} dalla strada${delGiorno} · controllato alle ${ora}`);
+      return;
+    }
     messaggio(`Entro ${DL.formattaDistanza(stato.raggio)} ${dove}${delGiorno} · controllato alle ${ora}`);
   }
 
   // Ricalcola distanze, prezzi e colori senza riscaricare (cambio potenza, filtri)
   function ricalcola() {
-    if (!stato.centro) return;
-    stato.vicini = DL.preparaColonnine(stato.tutti, stato.centro.lat, stato.centro.lon, stato.raggio, stato.potenza)
+    if (!stato.centro && !stato.percorso) return;
+    const p = stato.percorso;
+    stato.vicini = (p
+      ? DL.preparaPercorso(stato.tutti, p.perc, p.fascia, stato.potenza)
+      : DL.preparaColonnine(stato.tutti, stato.centro.lat, stato.centro.lon, stato.raggio, stato.potenza))
       .filter(passaFiltri);
     DL.classifica(stato.vicini);
     render();
@@ -275,8 +291,9 @@
         righe.push(`<p>più ${extra.join(" e ")}</p>`);
         voce.push(`Più ${extra.join(" e ").replace("€/min", "euro al minuto").replace("€ di", "euro di")}.`);
       }
-      if (d.fascia === "economico") voce.push("Tra le più economiche in zona.");
-      else if (d.fascia === "caro") voce.push("Tra le più care in zona.");
+      const zona = stato.percorso ? "sul percorso" : "in zona";
+      if (d.fascia === "economico") voce.push("Tra le più economiche " + zona + ".");
+      else if (d.fascia === "caro") voce.push("Tra le più care " + zona + ".");
       righe.push(d.fontePrezzo === "O"
         ? `<p class="avviso-lieve">Prezzo indicativo dell'app dell'operatore senza abbonamento${indice && indice.fonte_operatori ? " (" + esc(indice.fonte_operatori) + ")" : ""}: controlla prima di ricaricare</p>`
         : "<p>Prezzo senza abbonamento comunicato alla PUN</p>");
@@ -292,11 +309,19 @@
       `<tr><td>${DL.formattaKw(g[0])} <small>${g[1]}</small></td><td>${esc(g[2] || "–")}</td><td>${g[3]}${g[4] ? ` <small class="rosso">(${g[4]} ko)</small>` : ""}</td><td>${DL.formattaCent(g[5])}</td></tr>`).join("")}</table>`);
     const altri = (d.e || []).length - d.gruppi.length;
     if (altri > 0) righe.push(`<p class="nota">Ci sono anche altri posti di potenza diversa: scegli "Tutte" in alto per vederli.</p>`);
-    righe.push(`<p>${DL.formattaDistanza(d.distanza)} · circa ${DL.minutiInAuto(d.distanza)} min in auto</p>`);
-    voce.push(distanzaParlata(d.distanza) + ".");
+    const p = stato.percorso;
+    if (p && d.km != null) {
+      righe.push(`<p>${DL.formattaDistanza(d.distanza)} dalla strada · al km ${Math.round(d.km)} di ${Math.round(p.metri / 1000)}</p>`);
+      voce.push(distanzaParlata(d.distanza) + " dalla strada, al chilometro " + Math.round(d.km) + " del percorso.");
+    } else {
+      righe.push(`<p>${DL.formattaDistanza(d.distanza)} · circa ${DL.minutiInAuto(d.distanza)} min in auto</p>`);
+      voce.push(distanzaParlata(d.distanza) + ".");
+    }
     righe.push('<p class="fonte">Fonte: PUN – Piattaforma Unica Nazionale dei punti di ricarica</p>');
+    const tappa = p && d.km != null
+      ? `<a class="pop-vai pop-tappa" href="${linkTappa(d, p)}" target="_blank" rel="noopener">Fermati qui e prosegui</a>` : "";
     return `<div class="pop" data-voce="${attr(voce.join(" "))}"><h3>${esc(tit)}</h3>${righe.join("")}
-      <a class="pop-vai" href="${linkNavigazione(d.la, d.lo)}" target="_blank" rel="noopener">Portami qui</a></div>`;
+      <a class="pop-vai" href="${linkNavigazione(d.la, d.lo)}" target="_blank" rel="noopener">Portami qui</a>${tappa}</div>`;
   }
 
   function piuEconomico() {
@@ -304,21 +329,33 @@
       .sort((a, b) => a.prezzo - b.prezzo || a.distanza - b.distanza)[0] || null;
   }
   function piuVicino() {
-    return stato.vicini.filter((d) => !guasta(d)).sort((a, b) => a.distanza - b.distanza)[0] || null;
+    const funzionanti = stato.vicini.filter((d) => !guasta(d));
+    const p = stato.percorso;
+    if (p) {
+      // Sul percorso: la prossima colonnina davanti a te (se sei sulla strada), altrimenti la prima dalla partenza
+      const io = stato.gps ? DL.vicinoAlPercorso(p.perc, stato.gps.lat, stato.gps.lon, 3000) : null;
+      const km = io ? io.lungo / 1000 : 0;
+      return funzionanti.filter((d) => d.km >= km).sort((a, b) => a.km - b.km)[0] || null;
+    }
+    return funzionanti.sort((a, b) => a.distanza - b.distanza)[0] || null;
   }
 
   function render() {
     Object.entries(livelli).forEach(([k, g]) => { if (k !== "io") g.clearLayers(); });
     markerPerId.clear();
-    if (!stato.centro) return;
-    const { lat, lon } = stato.centro;
-
-    L.circle([lat, lon], {
-      radius: stato.raggio, color: getComputedStyle(document.documentElement).getPropertyValue("--blu").trim() || "#1b4f9c",
-      weight: 1.5, opacity: .6, fillOpacity: .04, dashArray: "6 6", interactive: false
-    }).addTo(livelli.raggio);
-    if (!stato.centro.daGps) {
-      L.circleMarker([lat, lon], { radius: 6, color: "#fff", weight: 2, fillColor: "#172033", fillOpacity: 1 }).addTo(livelli.io);
+    if (!stato.centro && !stato.percorso) return;
+    const blu = getComputedStyle(document.documentElement).getPropertyValue("--blu").trim() || "#1b4f9c";
+    if (stato.percorso) {
+      disegnaPercorso(blu);
+    } else {
+      const { lat, lon } = stato.centro;
+      L.circle([lat, lon], {
+        radius: stato.raggio, color: blu,
+        weight: 1.5, opacity: .6, fillOpacity: .04, dashArray: "6 6", interactive: false
+      }).addTo(livelli.raggio);
+      if (!stato.centro.daGps) {
+        L.circleMarker([lat, lon], { radius: 6, color: "#fff", weight: 2, fillColor: "#172033", fillOpacity: 1 }).addTo(livelli.raggio);
+      }
     }
 
     const migliore = piuEconomico();
@@ -365,7 +402,9 @@
         <div class="voce-titolo">${esc(DL.titolo(d))}</div>
         <div class="voce-meta">${meta.join("")}</div>
       </div>
-      <div class="voce-dist"><b>${DL.formattaDistanza(d.distanza)}</b><small>~${DL.minutiInAuto(d.distanza)} min</small></div>`;
+      ${stato.percorso && d.km != null
+        ? `<div class="voce-dist"><b>km ${Math.round(d.km)}</b><small>a ${DL.formattaDistanza(d.distanza)}</small></div>`
+        : `<div class="voce-dist"><b>${DL.formattaDistanza(d.distanza)}</b><small>~${DL.minutiInAuto(d.distanza)} min</small></div>`}`;
     const apri = () => { mostra(d); chiudiElenco(); };
     li.addEventListener("click", apri);
     li.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); apri(); } });
@@ -380,13 +419,15 @@
         if ((a.prezzo == null) !== (b.prezzo == null)) return a.prezzo == null ? 1 : -1;
         if (a.prezzo != null && a.prezzo !== b.prezzo) return a.prezzo - b.prezzo;
       }
-      return a.distanza - b.distanza;
+      // sul percorso "per distanza" vuol dire nell'ordine in cui le incontri
+      return stato.percorso ? a.km - b.km : a.distanza - b.distanza;
     });
     if (!lista.length) {
       const li = document.createElement("li");
       li.className = "vuoto";
       li.textContent = stato.filtri.size
         ? "Nessuna colonnina con questi filtri. Prova a toglierne uno o ad allargare il raggio."
+        : stato.percorso ? "Nessuna colonnina di questa potenza vicino alla strada. Prova ad allargare la distanza dalla strada o a scegliere un'altra potenza."
         : "Nessuna colonnina di questa potenza nel raggio. Prova ad allargarlo o a scegliere un'altra potenza.";
       ol.appendChild(li);
       return;
@@ -427,7 +468,8 @@
       cerchioPrecisione.setLatLng([lat, lon]).setRadius(acc);
     }
     if (window.QuiBussola) QuiBussola.gps(p.coords);   // cono dell'orientamento (bussola.js)
-    if (stato.seguiGps) impostaCentro(lat, lon, true);
+    if (stato.seguiGps && !stato.percorso) impostaCentro(lat, lon, true);
+    else if (stato.seguiGps) mappa.panTo([lat, lon]);
   }
 
   function erroreGps(e) {
@@ -462,16 +504,168 @@
       if (!primo) { messaggio("Indirizzo non trovato. Prova ad aggiungere la città.", true); return; }
       stato.seguiGps = false;
       $("cerca-indirizzo").blur();
+      if (stato.percorso) chiudiPercorso(true);
       impostaCentro(+primo.lat, +primo.lon, false);
     } catch (err) {
       messaggio("Ricerca non riuscita. Controlla la connessione.", true);
     }
   });
 
+  // ---------- Colonnine sul percorso ----------
+  // Scrivi partenza e arrivo: il percorso in auto lo calcola OSRM (servizio gratuito basato su OpenStreetMap),
+  // poi l'app mostra solo le colonnine vicine alla strada.
+  async function geocodifica(q) {
+    const url = "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=it&accept-language=it&q=" + encodeURIComponent(q);
+    const [primo] = await fetchJson(url, { headers: { Accept: "application/json" } }, 12000);
+    if (!primo) return null;
+    const nome = (primo.name || String(primo.display_name || q).split(",")[0] || q).trim();
+    return { lat: +primo.lat, lon: +primo.lon, nome };
+  }
+
+  async function calcolaPercorso(da, a, evita) {
+    const base = "https://router.project-osrm.org/route/v1/driving/" +
+      `${da.lon.toFixed(6)},${da.lat.toFixed(6)};${a.lon.toFixed(6)},${a.lat.toFixed(6)}?overview=full&geometries=geojson`;
+    let r = null, evitate = false;
+    if (evita) {
+      try { r = await fetchJson(base + "&exclude=motorway", {}, 20000); evitate = r && r.code === "Ok"; } catch (e) { r = null; }
+    }
+    if (!evitate) r = await fetchJson(base, {}, 20000);
+    if (!r || r.code !== "Ok" || !r.routes || !r.routes.length) throw new Error("percorso non trovato");
+    const rt = r.routes[0];
+    return {
+      punti: rt.geometry.coordinates.map(([lon, lat]) => [lat, lon]),
+      metri: rt.distance, secondi: rt.duration,
+      autostradeEvitate: evitate, evitaNonRiuscito: evita && !evitate
+    };
+  }
+
+  const kmPercorso = (p) => Math.round(p.metri / 1000) + " km";
+  let lineaPercorso = null;
+  function disegnaPercorso(blu) {
+    const p = stato.percorso;
+    L.polyline(p.perc.punti, { color: "#fff", weight: 9, opacity: .9, interactive: false }).addTo(livelli.raggio);
+    lineaPercorso = L.polyline(p.perc.punti, { color: blu, weight: 5, opacity: .9, interactive: false }).addTo(livelli.raggio);
+    const pin = (cls, testo) => L.divIcon({ className: "", html: `<div class="perc-pin ${cls}">${testo}</div>`, iconSize: [26, 26], iconAnchor: [13, 13] });
+    const pts = p.perc.punti;
+    L.marker(pts[0], { icon: pin("da", "A"), interactive: false, zIndexOffset: 900 }).addTo(livelli.raggio);
+    L.marker(pts[pts.length - 1], { icon: pin("a", "B"), interactive: false, zIndexOffset: 900 }).addTo(livelli.raggio);
+  }
+
+  function aggiornaModoPercorso() {
+    const p = stato.percorso;
+    $("percorso-barra").hidden = !p;
+    $("btn-percorso").setAttribute("aria-pressed", String(!!p));
+    $("raggio").disabled = !!p;
+    $("raggio").title = p ? "Sul percorso conta la distanza dalla strada" : "";
+    const chip = document.querySelector('.chip.ordine[data-ordine="distanza"]');
+    if (chip) chip.textContent = p ? "Lungo il percorso" : "Per distanza";
+    if (p) {
+      $("percorso-testo").textContent = `${p.daGps ? "Verso " + p.a : p.da + " → " + p.a} · ${kmPercorso(p)} · ${DL.formattaDurata(p.secondi)}`;
+    }
+  }
+
+  function apriPercorso() {
+    $("percorso").hidden = false;
+    $("btn-percorso").setAttribute("aria-expanded", "true");
+    const a = $("perc-a");
+    setTimeout(() => (a.value ? $("btn-perc-vai") : a).focus(), 50);
+  }
+  function chiudiFormPercorso() {
+    if ($("percorso").hidden) return false;
+    $("percorso").hidden = true;
+    $("btn-percorso").setAttribute("aria-expanded", "false");
+    return true;
+  }
+  // Esce dal percorso e torna alle colonnine intorno a te (o al punto cercato, se "silenzioso")
+  function chiudiPercorso(silenzioso) {
+    if (!stato.percorso) return;
+    stato.percorso = null;
+    lineaPercorso = null;
+    stato.tutti = [];
+    aggiornaModoPercorso();
+    if (silenzioso) return;
+    stato.seguiGps = true;
+    if (stato.gps) {
+      stato.centro = null;
+      impostaCentro(stato.gps.lat, stato.gps.lon, true);
+    } else if (stato.centro) {
+      mappa.fitBounds(L.latLng(stato.centro.lat, stato.centro.lon).toBounds(stato.raggio * 2.1));
+      carica();
+    } else render();
+  }
+
+  $("perc-da").value = leggiPref("percDa", "");
+  $("perc-a").value = leggiPref("percA", "");
+  $("perc-fascia").value = leggiPref("percFascia", "1000");
+  if (!$("perc-fascia").value) $("perc-fascia").value = "1000";
+  $("perc-evita").checked = leggiPref("percEvita", "0") === "1";
+
+  $("percorso").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const testoDa = $("perc-da").value.trim(), testoA = $("perc-a").value.trim();
+    if (!testoA) { $("perc-a").focus(); return; }
+    const fascia = +$("perc-fascia").value || 1000;
+    const evita = $("perc-evita").checked;
+    salvaPref("percDa", testoDa); salvaPref("percA", testoA);
+    salvaPref("percFascia", fascia); salvaPref("percEvita", evita ? "1" : "0");
+    const vai = $("btn-perc-vai");
+    const avviso = (t) => { $("perc-errore").textContent = t; $("perc-errore").hidden = !t; };
+    avviso("");
+    vai.disabled = true;
+    vai.textContent = "Calcolo il percorso…";
+    try {
+      let da;
+      if (!testoDa || /^(la )?mia posizione$|^qui$/i.test(testoDa)) {
+        if (!stato.gps) { avviso("Posizione non ancora disponibile: scrivi anche da dove parti."); return; }
+        da = { lat: stato.gps.lat, lon: stato.gps.lon, nome: "la tua posizione", gps: true };
+      } else {
+        da = await geocodifica(testoDa);
+        if (!da) { avviso("Partenza non trovata. Prova ad aggiungere la città."); return; }
+      }
+      const a = await geocodifica(testoA);
+      if (!a) { avviso("Arrivo non trovato. Prova ad aggiungere la città."); return; }
+      const r = await calcolaPercorso(da, a, evita);
+      stato.percorso = {
+        perc: DL.indicizzaPercorso(r.punti), da: da.nome, daGps: !!da.gps, a: a.nome, arrivo: [a.lat, a.lon],
+        metri: r.metri, secondi: r.secondi, fascia
+      };
+      stato.tutti = [];
+      stato.seguiGps = false;
+      chiudiFormPercorso();
+      aggiornaModoPercorso();
+      mappa.closePopup();
+      render();
+      if (lineaPercorso) mappa.fitBounds(lineaPercorso.getBounds(), { padding: [30, 30] });
+      if (r.evitaNonRiuscito) toast("Non è stato possibile evitare le autostrade: percorso normale.");
+      if (window.goatcounter && window.goatcounter.count) window.goatcounter.count({ path: "percorso", title: "Colonnine sul percorso", event: true });
+      carica();
+    } catch (err) {
+      console.warn("Percorso non calcolato", err);
+      avviso("Non riesco a calcolare il percorso. Controlla la connessione e riprova.");
+    } finally {
+      vai.disabled = false;
+      vai.textContent = "Mostra le colonnine";
+    }
+  });
+  $("btn-percorso").addEventListener("click", () => { if (!chiudiFormPercorso()) apriPercorso(); });
+  $("btn-chiudi-form-percorso").addEventListener("click", chiudiFormPercorso);
+  $("percorso-testo").addEventListener("click", () => {
+    if (lineaPercorso) { stato.seguiGps = false; mappa.fitBounds(lineaPercorso.getBounds(), { padding: [30, 30] }); }
+    apriPercorso();
+  });
+  $("btn-esci-percorso").addEventListener("click", () => { chiudiFormPercorso(); chiudiPercorso(); });
+  $("btn-perc-inverti").addEventListener("click", () => {
+    const x = $("perc-da").value; $("perc-da").value = $("perc-a").value; $("perc-a").value = x;
+  });
+
+
   // ---------- Controlli ----------
   $("btn-centra").addEventListener("click", () => {
     stato.seguiGps = true;
-    if (stato.gps) {
+    if (stato.gps && stato.percorso) {
+      // sul percorso la mappa ti segue senza uscire dal percorso
+      mappa.setView([stato.gps.lat, stato.gps.lon], Math.max(mappa.getZoom(), 14));
+    } else if (stato.gps) {
       impostaCentro(stato.gps.lat, stato.gps.lon, true);
       mappa.fitBounds(L.latLng(stato.gps.lat, stato.gps.lon).toBounds(stato.raggio * 2.1));
     } else toast("Posizione non ancora disponibile.");
@@ -479,18 +673,18 @@
   $("btn-aggiorna").addEventListener("click", () => carica(true));
   $("btn-economico").addEventListener("click", () => {
     const d = piuEconomico();
-    if (d) mostra(d); else toast("Nessun prezzo disponibile in questo raggio.");
+    if (d) mostra(d); else toast(stato.percorso ? "Nessun prezzo disponibile lungo il percorso." : "Nessun prezzo disponibile in questo raggio.");
   });
   $("btn-vicino").addEventListener("click", () => {
     const d = piuVicino();
-    if (d) mostra(d); else toast("Nessuna colonnina funzionante in questo raggio.");
+    if (d) mostra(d); else toast(stato.percorso ? "Nessuna colonnina funzionante più avanti sul percorso." : "Nessuna colonnina funzionante in questo raggio.");
   });
 
   $("raggio").value = String(stato.raggio);
   $("raggio").addEventListener("change", (e) => {
     stato.raggio = +e.target.value;
     salvaPref("raggio", stato.raggio);
-    if (stato.centro) {
+    if (stato.centro && !stato.percorso) {
       mappa.fitBounds(L.latLng(stato.centro.lat, stato.centro.lon).toBounds(stato.raggio * 2.1));
       carica();
     }
@@ -566,7 +760,7 @@
     if (dest) dest.scrollIntoView({ behavior: "smooth", block: "start" });
   }));
   $("guida-versione").textContent = "Versione " + (cfg.versione || "");
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !chiudiGuida()) chiudiElenco(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !chiudiGuida() && !chiudiFormPercorso()) chiudiElenco(); });
 
   // ---------- Lettura vocale dei riquadri ----------
   let letturaAttiva = leggiPref("lettura", "1") !== "0";
@@ -608,6 +802,12 @@
   function autoAggiorna() {
     if (document.hidden || !stato.gps) return;
     stato.seguiGps = true;
+    if (stato.percorso) {
+      // sul percorso: la mappa ti segue, le colonnine restano quelle lungo la strada
+      mappa.setView([stato.gps.lat, stato.gps.lon], Math.max(mappa.getZoom(), 12));
+      carica(false, true);
+      return;
+    }
     stato.centro = { lat: stato.gps.lat, lon: stato.gps.lon, daGps: true };
     mappa.setView([stato.gps.lat, stato.gps.lon], Math.max(mappa.getZoom(), 13));
     carica(false, true);
@@ -664,7 +864,7 @@
   });
 
   // Ogni 15 minuti controlla se il sito ha dati nuovi
-  setInterval(() => { if (stato.centro && !stato.caricando && !document.hidden) carica(false, true); }, 15 * 60000);
+  setInterval(() => { if ((stato.centro || stato.percorso) && !stato.caricando && !document.hidden) carica(false, true); }, 15 * 60000);
 
   // Numero di versione nell'ultima riga della pagina Elenco
   $("elenco-versione").textContent = "Versione " + (cfg.versione || "");
