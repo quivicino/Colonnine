@@ -770,9 +770,31 @@
   // ---------- Lettura vocale dei riquadri ----------
   let letturaAttiva = leggiPref("lettura", "1") !== "0";
   const sintesi = window.speechSynthesis;
+  // Sceglie la voce italiana più naturale installata: Premium e Migliorata (iPhone, Mac),
+  // "Natural"/"Neural" (Edge, Windows), Google (Android); evita le voci buffe di iOS (Eddy, Nonna…).
+  let voceScelta;
+  function punteggioVoce(v) {
+    const n = `${v.name} ${v.voiceURI || ""}`.toLowerCase();
+    if (/eloquence|eddy|flo\b|grandma|grandpa|nonna|nonno|reed|rocko|sandy|shelley|bells|bubbles|boing|jester|organ|superstar|trinoids|whisper|wobble|zarvox|albert|bad news|good news|cellos|fred|junior|kathy|ralph/.test(n)) return -100;
+    let p = /^it[-_]it/i.test(v.lang) ? 10 : 5;
+    if (/premium/.test(n)) p += 60;
+    else if (/natural|neural/.test(n)) p += 55;
+    else if (/enhanced|migliorata|avanzata/.test(n)) p += 45;
+    else if (/siri/.test(n)) p += 40;
+    else if (/google/.test(n)) p += 25;
+    if (v.localService) p += 3;
+    return p;
+  }
   function vocItaliana() {
-    const voci = sintesi ? sintesi.getVoices() : [];
-    return voci.find((v) => /^it[-_]IT/i.test(v.lang) && v.localService) || voci.find((v) => /^it/i.test(v.lang)) || null;
+    if (voceScelta !== undefined) return voceScelta;
+    const voci = (sintesi ? sintesi.getVoices() : []).filter((v) => /^it/i.test(v.lang));
+    if (!voci.length) return null;          // l'elenco può arrivare dopo: riprova la prossima volta
+    voci.sort((a, b) => punteggioVoce(b) - punteggioVoce(a));
+    voceScelta = voci[0];
+    return voceScelta;
+  }
+  if (sintesi && "onvoiceschanged" in sintesi) {
+    sintesi.addEventListener("voiceschanged", () => { voceScelta = undefined; });
   }
   function leggi(testo) {
     if (!sintesi || !testo) return;
