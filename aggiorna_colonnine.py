@@ -17,6 +17,9 @@ Ogni EVSE è un punto dove ricarica UNA auto: i punti con le stesse coordinate f
 
 Prezzo: se la PUN lo fornisce (tariffa OCPI senza abbonamento, "AD_HOC_PAYMENT") viene usato quello;
 altrimenti, se c'è, il prezzo indicativo dell'operatore scritto a mano in prezzi_operatori.json.
+Colonnine di Poste Italiane (Progetto Polis): nella PUN risultano a nome dell'operatore che le gestisce
+(Plenitude, Enel X Way, UAU…). Le riconosciamo con OpenStreetMap: le colonnine AC fino a 22 kW entro 50 m
+da una stazione di ricarica che in OSM ha operator/brand/network/name "Poste" ricevono "p": 1.
 Dipendenze: boto3 e requests (le installa il workflow).
 """
 import json
@@ -41,6 +44,19 @@ CARTELLA = "dati"
 PASSO = 0.25          # lato della tessera in gradi
 PAGINA = 1000
 GRUPPO = 100
+
+# Colonnine Poste Italiane da OpenStreetMap (Overpass)
+OVERPASS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter",
+            "https://maps.mail.ru/osm/tools/overpass/api/interpreter"]
+QUERY_POSTE = """[out:json][timeout:180];
+area["ISO3166-1"="IT"][admin_level=2]->.it;
+nwr["amenity"="charging_station"]["operator"~"poste",i](area.it);
+nwr["amenity"="charging_station"]["brand"~"poste",i](area.it);
+nwr["amenity"="charging_station"]["network"~"poste",i](area.it);
+nwr["amenity"="charging_station"]["name"~"poste",i](area.it);
+out center;"""
+RAGGIO_POSTE = 50     # metri
+KW_POSTE = 22.5       # le colonnine Polis sono AC da 22 kW
 
 # Stati che non contano come posti (punto tolto o non ancora costruito)
 ESCLUSI = {"REMOVED", "PLANNED"}
@@ -402,11 +418,65 @@ def costruisci(record, tabella_operatori):
     return list(siti.values()), n_prezzi
 
 
+def poste_osm(sito):
+    """Coordinate delle stazioni di ricarica "Poste" in OpenStreetMap. Se Overpass non risponde,
+    usa l'elenco pubblicato dall'aggiornamento precedente (dati/poste.json)."""
+    for url in OVERPASS:
+        try:
+            req = urllib.request.Request(url, data=("data=" + urllib.request.quote(QUERY_POSTE)).encode(),
+                                         headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=240) as r:
+                el = json.loads(r.read().decode("utf-8")).get("elements", [])
+            punti = set()
+            for e in el:
+                c = e.get("center") or e
+                if c.get("lat") is not None and c.get("lon") is not None:
+                    punti.add((round(c["lat"], 6), round(c["lon"], 6)))
+            if punti:
+                print(f"  OpenStreetMap: {len(punti)} stazioni di ricarica Poste ({url})")
+                return sorted(punti), "OpenStreetMap"
+            print(f"  {url}: nessuna stazione Poste trovata")
+        except Exception as ex:
+            print(f"  {url}: {ex}")
+    if sito:
+        try:
+            req = urllib.request.Request(sito.rstrip("/") + f"/{CARTELLA}/poste.json", headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                prec = json.loads(r.read().decode("utf-8"))
+            print(f"  OpenStreetMap non raggiungibile: uso le {len(prec['punti'])} stazioni Poste del {prec.get('aggiornato')}")
+            return [tuple(p) for p in prec["punti"]], prec.get("aggiornato", "")
+        except Exception as ex:
+            print(f"  elenco Poste precedente non letto: {ex}")
+    return [], ""
+
+
+def segna_poste(siti, punti):
+    """Mette "p": 1 alle colonnine AC fino a 22 kW entro RAGGIO_POSTE metri da una stazione Poste di OSM."""
+    griglia = {}
+    for la, lo in punti:
+        griglia.setdefault((math.floor(la * 100), math.floor(lo * 100)), []).append((la, lo))
+    n = 0
+    for s in siti:
+        if any(g[1] != "AC" or g[0] > KW_POSTE for g in s["e"]):
+            continue
+        cla, clo = math.floor(s["la"] * 100), math.floor(s["lo"] * 100)
+        k = math.cos(math.radians(s["la"]))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for la, lo in griglia.get((cla + dx, clo + dy), ()):
+                    d = 111195 * math.hypot(s["la"] - la, (s["lo"] - lo) * k)
+                    if d <= RAGGIO_POSTE:
+                        s["p"] = 1
+        n += s.get("p", 0)
+    print(f"  colonnine segnate come Poste Italiane: {n}")
+    return n
+
+
 def nome_tessera(lat, lon):
     return f"t_{math.floor(lat / PASSO)}_{math.floor(lon / PASSO)}.json"
 
 
-def salva(siti, n_prezzi, fonte_operatori, diagnosi):
+def salva(siti, n_prezzi, fonte_operatori, diagnosi, poste=([], ""), n_poste=0):
     if os.path.isdir(CARTELLA):
         shutil.rmtree(CARTELLA)
     os.makedirs(CARTELLA)
@@ -424,6 +494,7 @@ def salva(siti, n_prezzi, fonte_operatori, diagnosi):
         "prezzi_pun": n_prezzi.get("P", 0),
         "prezzi_operatori": n_prezzi.get("O", 0),
         "fonte_operatori": fonte_operatori,
+        "poste": n_poste,
         "tessere": sorted(tessere),
         "fonte": "PUN – Piattaforma Unica Nazionale dei punti di ricarica (MASE/GSE)",
     }
@@ -431,6 +502,10 @@ def salva(siti, n_prezzi, fonte_operatori, diagnosi):
         json.dump(indice, f, indent=1, ensure_ascii=False)
     with open(os.path.join(CARTELLA, "diagnosi.json"), "w", encoding="utf-8") as f:
         json.dump(diagnosi, f, indent=1, ensure_ascii=False)
+    if poste[0]:
+        agg = indice["aggiornato"] if poste[1] == "OpenStreetMap" else poste[1]
+        with open(os.path.join(CARTELLA, "poste.json"), "w", encoding="utf-8") as f:
+            json.dump({"aggiornato": agg, "fonte": "OpenStreetMap (ODbL)", "punti": poste[0]}, f, separators=(",", ":"))
     print(f"  salvate {len(tessere)} tessere")
 
 
@@ -455,7 +530,15 @@ def recupera_dal_sito(sito):
     if os.path.isdir(CARTELLA):
         shutil.rmtree(CARTELLA)
     os.makedirs(CARTELLA)
-    for t in indice["tessere"]:
+    for t in indice["tessere"] + ["poste.json"]:
+        if t == "poste.json":
+            try:
+                dati = scarica(f"{sito}{CARTELLA}/{t}")
+            except RuntimeError:
+                continue
+            with open(os.path.join(CARTELLA, t), "wb") as f:
+                f.write(dati)
+            continue
         with open(os.path.join(CARTELLA, t), "wb") as f:
             f.write(scarica(f"{sito}{CARTELLA}/{t}"))
     with open(os.path.join(CARTELLA, "indice.json"), "w", encoding="utf-8") as f:
@@ -508,7 +591,10 @@ def main():
         diagnosi = {"campi": dict(sorted(conta.items())), "prove_tariffe": prove,
                     "esempio_mappa": voci[:3], "esempi": record[:5],
                     "esempi_tariffe": [r for r in record if isinstance(r.get("punTariffsDetails"), dict)][:8]}
-        salva(siti, n_prezzi, fonte_op, diagnosi)
+        print("Cerco le colonnine Poste Italiane in OpenStreetMap…")
+        poste = poste_osm(os.environ.get("SITO"))
+        n_poste = segna_poste(siti, poste[0])
+        salva(siti, n_prezzi, fonte_op, diagnosi, poste, n_poste)
         scrivi_esito(True, prima)
     except Exception as ex:
         print(f"PUN non disponibile: {ex}")

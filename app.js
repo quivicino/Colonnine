@@ -276,6 +276,10 @@
     const voce = [tit + ".", ind + "."];
     const righe = [];
     if (d.r && d.r.toLowerCase() !== tit.toLowerCase()) righe.push(`<p class="ragione">${esc(d.r)}</p>`);
+    if (d.p) {
+      righe.push('<p><span class="tag poste">Poste Italiane</span> colonnina dell\'ufficio postale</p>');
+      voce.push("Colonnina di Poste Italiane.");
+    }
     righe.push(`<p>${esc(ind)}</p>`);
     const tag = [];
     if (d.h) tag.push('<span class="tag h24">Aperta 24 ore</span>');
@@ -391,6 +395,7 @@
     li.className = "voce";
     li.tabIndex = 0;
     const meta = [`<span>${esc(DL.indirizzo(d))}</span>`, `<span><b>${DL.testoPosti(d.posti)}</b> · ${DL.formattaKw(d.kw)}</span>`];
+    if (d.p) meta.push('<span class="tag poste">Poste</span>');
     if (d.h) meta.push('<span class="tag h24">24 ore</span>');
     if (guasta(d)) meta.push('<span class="tag vecchio">fuori servizio</span>');
     else if (d.guasti) meta.push(`<span class="tag vecchio">${d.guasti} ko</span>`);

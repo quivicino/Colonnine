@@ -393,6 +393,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 .mk.guasta { border-style: dashed; opacity: .6; }
 .tag.h24 { color: var(--libero); }
+.tag.poste { color: #1d2b6b; background: #ffd100; padding: 0 6px; border-radius: 4px; }
 .pop .ragione { font-size: 15px; margin-top: -2px; }
 .pop .pop-posti { color: var(--testo); }
 .pop .avviso-lieve { color: var(--testo-2); font-style: italic; }
