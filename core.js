@@ -89,17 +89,33 @@
     return { ...s, id: "c/" + s.i, distanza: dist, gruppi, posti, guasti, kw, prezzo, fontePrezzo: fonte, attivazione, minuto, fascia: "nd" };
   }
 
-  function classifica(lista) {
+  // Giorni passati da una data ISO (null se manca)
+  function giorniDa(data, oggi) {
+    if (!data) return null;
+    const t = Date.parse(data);
+    if (isNaN(t)) return null;
+    return Math.floor(((oggi || Date.now()) - t) / 86400000);
+  }
+  // Prezzo più vecchio di "giorni" (default 10): va sempre in fondo alle classifiche
+  function inFondo(d, giorni, oggi) {
+    const g = giorniDa(d.dataPrezzo, oggi);
+    return g != null && g > (giorni == null ? 10 : giorni);
+  }
+
+  function classifica(lista, giorni) {
     for (const d of lista) d.fascia = "nd";
-    const con = lista.filter((d) => d.prezzo != null).sort((a, b) => a.prezzo - b.prezzo);
+    // Le fasce si calcolano sui prezzi recenti; quelli vecchi non spostano le soglie
+    const tutti = lista.filter((d) => d.prezzo != null);
+    const recenti = tutti.filter((d) => !inFondo(d, giorni));
+    const con = (recenti.length ? recenti : tutti).slice().sort((a, b) => a.prezzo - b.prezzo);
     const n = con.length;
     if (!n) return lista;
     const min = con[0].prezzo, max = con[n - 1].prezzo;
     // Soglie a un terzo e due terzi della classifica; a parità di prezzo stessa fascia
     const soglia1 = con[Math.floor((n - 1) / 3)].prezzo;
     const soglia2 = con[Math.ceil(2 * (n - 1) / 3)].prezzo;
-    for (const d of con) {
-      if (max - min < 0.005) d.fascia = "economico";        // tutti uguali (al centesimo)
+    for (const d of tutti) {
+      if (max - min < 0.005) d.fascia = d.prezzo <= min + 0.005 ? "economico" : "caro"; // tutti uguali (al centesimo)
       else if (d.prezzo <= soglia1) d.fascia = "economico";
       else if (d.prezzo >= soglia2 && d.prezzo > soglia1) d.fascia = "caro";
       else d.fascia = "medio";
@@ -251,7 +267,7 @@
 
   const API = {
     distanza, formattaDistanza, minutiInAuto, POTENZE, ULTRA_KW, passaPotenza, formattaCent, formattaEuro, formattaKw,
-    preparaColonnine, classifica, statistiche, tessereNelRaggio, titolo, capitalizza, indirizzo, testoPosti,
+    preparaColonnine, classifica, giorniDa, inFondo, statistiche, tessereNelRaggio, titolo, capitalizza, indirizzo, testoPosti,
     indicizzaPercorso, vicinoAlPercorso, tesserePercorso, preparaPercorso, formattaDurata
   };
   if (typeof module !== "undefined" && module.exports) module.exports = API;
