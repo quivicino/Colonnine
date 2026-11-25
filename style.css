@@ -594,5 +594,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 /* bordino bianco sui pulsanti e menu della barra, come i pulsanti in basso */
 .barra-btn, .raggio select, .carb select { box-shadow: 0 0 0 2px rgba(255,255,255,.9); }
-/* pulsanti in basso sempre pieni: anche quando non sono ancora usabili la mappa non si vede attraverso */
-.pill-azione:disabled { opacity: 1; background: #8a93a6; color: #fff; }
+/* pulsanti in basso: sfondo semitrasparente (sotto si intravede la mappa), testo e bordino pieni */
+.pill-azione.verde { background: color-mix(in srgb, var(--libero) 72%, transparent); }
+.pill-azione.blu { background: rgba(13, 12, 242, .72); }
+.pill-azione:disabled { opacity: 1; background: rgba(138, 147, 166, .72); color: #fff; }
