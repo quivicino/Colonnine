@@ -250,7 +250,10 @@
       ? DL.preparaPercorso(stato.tutti, p.perc, p.fascia, stato.potenza)
       : DL.preparaColonnine(stato.tutti, stato.centro.lat, stato.centro.lon, stato.raggio, stato.potenza))
       .filter(passaFiltri);
-    DL.classifica(stato.vicini);
+    // Data dei prezzi = ultimo aggiornamento dei dati della PUN (se i dati restano vecchi, i prezzi vanno in fondo)
+    const dataDati = indice && indice.aggiornato;
+    for (const d of stato.vicini) d.dataPrezzo = d.prezzo != null ? dataDati : null;
+    DL.classifica(stato.vicini, cfg.giorniInFondo);
     render();
   }
 
@@ -328,12 +331,19 @@
       <a class="pop-vai" href="${linkNavigazione(d.la, d.lo)}" target="_blank" rel="noopener">Portami qui</a>${tappa}</div>`;
   }
 
+  // Prezzi più vecchi di cfg.giorniInFondo giorni: sempre in fondo alle classifiche
+  const inFondo = (d) => d.prezzo != null && DL.inFondo(d, cfg.giorniInFondo);
+  // Solo le colonnine con prezzi recenti, se ce ne sono
+  function senzaVecchi(lista) {
+    const recenti = lista.filter((d) => !inFondo(d));
+    return recenti.length ? recenti : lista;
+  }
   function piuEconomico() {
-    return stato.vicini.filter((d) => d.prezzo != null)
+    return senzaVecchi(stato.vicini.filter((d) => d.prezzo != null))
       .sort((a, b) => a.prezzo - b.prezzo || a.distanza - b.distanza)[0] || null;
   }
   function piuVicino() {
-    const funzionanti = stato.vicini.filter((d) => !guasta(d));
+    const funzionanti = senzaVecchi(stato.vicini.filter((d) => !guasta(d)));
     const p = stato.percorso;
     if (p) {
       // Sul percorso: la prossima colonnina davanti a te (se sei sulla strada), altrimenti la prima dalla partenza
@@ -420,6 +430,8 @@
     const ol = $("lista");
     ol.innerHTML = "";
     const lista = stato.vicini.slice().sort((a, b) => {
+      // i prezzi più vecchi di cfg.giorniInFondo giorni sempre in fondo
+      if (inFondo(a) !== inFondo(b)) return inFondo(a) ? 1 : -1;
       if (stato.ordine === "prezzo") {
         if ((a.prezzo == null) !== (b.prezzo == null)) return a.prezzo == null ? 1 : -1;
         if (a.prezzo != null && a.prezzo !== b.prezzo) return a.prezzo - b.prezzo;
@@ -497,7 +509,21 @@
     navigator.geolocation.watchPosition(suPosizione, erroreGps, { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 });
   }
 
-  // ---------- Ricerca indirizzo ----------
+  // ---------- Ricerca indirizzo (finestra "Vai a") ----------
+  function apriVai() {
+    chiudiFormPercorso();
+    $("form-cerca").hidden = false;
+    $("btn-vai").setAttribute("aria-expanded", "true");
+    setTimeout(() => $("cerca-indirizzo").focus(), 50);
+  }
+  function chiudiVai() {
+    if ($("form-cerca").hidden) return false;
+    $("form-cerca").hidden = true;
+    $("btn-vai").setAttribute("aria-expanded", "false");
+    return true;
+  }
+  $("btn-vai").addEventListener("click", () => { if (!chiudiVai()) apriVai(); });
+  $("btn-chiudi-vai").addEventListener("click", chiudiVai);
   $("form-cerca").addEventListener("submit", async (e) => {
     e.preventDefault();
     const q = $("cerca-indirizzo").value.trim();
@@ -509,6 +535,7 @@
       if (!primo) { messaggio("Indirizzo non trovato. Prova ad aggiungere la città.", true); return; }
       stato.seguiGps = false;
       $("cerca-indirizzo").blur();
+      chiudiVai();
       if (stato.percorso) chiudiPercorso(true);
       impostaCentro(+primo.lat, +primo.lon, false);
     } catch (err) {
@@ -570,6 +597,7 @@
   }
 
   function apriPercorso() {
+    chiudiVai();
     $("percorso").hidden = false;
     $("btn-percorso").setAttribute("aria-expanded", "true");
     const a = $("perc-a");
@@ -765,7 +793,7 @@
     if (dest) dest.scrollIntoView({ behavior: "smooth", block: "start" });
   }));
   $("guida-versione").textContent = "Versione " + (cfg.versione || "");
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !chiudiGuida() && !chiudiFormPercorso()) chiudiElenco(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !chiudiGuida() && !chiudiFormPercorso() && !chiudiVai()) chiudiElenco(); });
 
   // ---------- Lettura vocale dei riquadri ----------
   let letturaAttiva = leggiPref("lettura", "1") !== "0";
@@ -870,6 +898,15 @@
   }
   document.addEventListener("visibilitychange", aggiornaSchermoAcceso);
   document.addEventListener("pointerdown", () => { if (autoAttivo && !bloccoSchermo) aggiornaSchermoAcceso(); }, { passive: true });
+
+  // Riassunto delle impostazioni sul pulsante chiuso, es. "120 s · Stradale"
+  function riassuntoImpostazioni() {
+    const testo = (id) => { const s = $(id); return s && s.selectedOptions[0] ? s.selectedOptions[0].textContent : ""; };
+    const auto = $("auto-refresh").value === "0" ? "refresh spento" : $("auto-refresh").value + " s";
+    $("imp-riassunto").textContent = [auto, testo("sfondo")].join(" · ");
+  }
+  for (const id of ["auto-refresh", "suoni", "sfondo", "lettura"]) $(id).addEventListener("change", riassuntoImpostazioni);
+  setTimeout(riassuntoImpostazioni, 0);
 
   let secAuto = cfg.autoRefreshSecondi ?? 120;
   const salvato = leggiPref("auto", null);
