@@ -592,3 +592,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   .raggio select, .carb select { padding: 0 0 0 5px; font-size: 13px; letter-spacing: -.01em; }
   .raggio, .carb { flex: none; }
 }
+/* bordino bianco sui pulsanti e menu della barra, come i pulsanti in basso */
+.barra-btn, .raggio select, .carb select { box-shadow: 0 0 0 2px rgba(255,255,255,.9); }
+/* pulsanti in basso sempre pieni: anche quando non sono ancora usabili la mappa non si vede attraverso */
+.pill-azione:disabled { opacity: 1; background: #8a93a6; color: #fff; }
